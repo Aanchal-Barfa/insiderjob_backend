@@ -67,10 +67,22 @@ export const getUserData = async(req,res) => {
 
     try {
         
-        const user = await User.findOne({ clerkUserId: userId })
+        let user = await User.findById(userId);
 
         if (!user) {
-           return res.json({success: false, message:'User Not Found'}) 
+          try {
+                // We'll need to get user data from Clerk
+                // Since we don't have access to Clerk's API here directly,
+                // we'll return a specific error code that the frontend can handle
+                return res.json({
+                    success: false,
+                    message: 'User Not Found',
+                    code: 'USER_NOT_FOUND_NEEDS_CREATION'
+                });
+            } catch (createError) {
+                console.error('Error in automatic user creation:', createError);
+                return res.json({success: false, message: 'Failed to create user automatically'});
+            }
         }
 
         res.json({success:true, user})
@@ -86,28 +98,105 @@ export const createUserIfNotExists = async (req, res) => {
     const { firstName, lastName, email, image } = req.body;
 
     try {
-        let user = await User.findOne({ clerkUserId: userId });
+        console.log('Creating user with data:', { userId, firstName, lastName, email });
 
-        // if (!user) {
-        //     user = await User.create({
-        //         _id: userId,
-        //         name: `${firstName} ${lastName}`,
-        //         email,
-        //         image
-        //     });
-        // }
+        // First try to find the user by ID
+        let user = await User.findById(userId);
+        console.log('User found by ID:', user ? 'Yes' : 'No');
+
+        // If user not found by ID, try to find by email
+        if (!user && email) {
+            user = await User.findOne({ email });
+            console.log('User found by email:', user ? 'Yes' : 'No');
+        }
+
+        // If user still not found, create a new user
         if (!user) {
-      user = await User.create({
-        clerkUserId: userId, //  Save Clerk ID
-        firstName,
-        lastName,
-        email,
-        image,
-      });
-    }
+            // Make sure we have all required fields
+            if (!firstName || !lastName || !email || !image) {
+                console.log('Missing required user information');
+                return res.json({
+                    success: false,
+                    message: 'Missing required user information'
+                });
+            }
+
+            try {
+                // Check if there are any users with null clerkUserId that might cause conflicts
+                const conflictingUsers = await User.find({
+                    $or: [
+                        { email: email },
+                        { _id: userId }
+                    ]
+                });
+
+                if (conflictingUsers.length > 0) {
+                    console.log('Found conflicting users:', conflictingUsers.length);
+                    // Delete any conflicting users to avoid duplicate key errors
+                    for (const conflictUser of conflictingUsers) {
+                        console.log('Removing conflicting user:', conflictUser._id);
+                        await User.findByIdAndDelete(conflictUser._id);
+                    }
+                }
+
+                // Now create the new user
+                user = await User.create({
+                    _id: userId,
+                    name: `${firstName} ${lastName}`,
+                    email,
+                    image,
+                    resume: ''
+                });
+                console.log('User created successfully:', userId);
+            } catch (createError) {
+                console.error('Error creating user:', createError);
+                return res.json({
+                    success: false,
+                    message: `Failed to create user: ${createError.message}`
+                });
+            }
+        } else {
+            // If user exists but some fields might need updating
+            if (user._id !== userId) {
+                console.log('Updating user ID from', user._id, 'to', userId);
+                // This means we found the user by email but with a different ID
+                // We need to delete the old user and create a new one with the correct ID
+                try {
+                    await User.findByIdAndDelete(user._id);
+                    user = await User.create({
+                        _id: userId,
+                        name: user.name || `${firstName} ${lastName}`,
+                        email: user.email || email,
+                        image: user.image || image,
+                        resume: user.resume || ''
+                    });
+                } catch (updateError) {
+                    console.error('Error updating user ID:', updateError);
+                    return res.json({
+                        success: false,
+                        message: `Failed to update user ID: ${updateError.message}`
+                    });
+                }
+            } else {
+                // Update other fields if needed
+                const needsUpdate =
+                    (firstName && lastName && user.name !== `${firstName} ${lastName}`) ||
+                    (email && user.email !== email) ||
+                    (image && user.image !== image);
+
+                if (needsUpdate) {
+                    console.log('Updating user fields');
+                    user.name = `${firstName} ${lastName}`;
+                    user.email = email;
+                    user.image = image;
+                    await user.save();
+                }
+            }
+        }
 
         res.json({ success: true, user });
     } catch (error) {
+        console.error('Error in createUserIfNotExists:', error);
         res.json({ success: false, message: error.message });
     }
 };
